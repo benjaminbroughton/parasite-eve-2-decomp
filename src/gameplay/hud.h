@@ -105,4 +105,26 @@ typedef struct {
 } HudState;
 STATIC_ASSERT_SIZEOF(HudState, 0x24);
 
+#ifdef PC_PORT
+/// The PC port's HUD setting (pe2.toml [video] hud; the Options' Video):
+/// `PC_HUD_*`, read every frame.
+s32 pc_hud_mode(void);
+enum {
+    PC_HUD_DEFAULT     = 0, // As the game draws it
+    PC_HUD_BATTLE_ONLY = 1, // Only while `HudState.inBattle` is set
+    PC_HUD_OFF         = 2, // Never
+};
+
+/// Whether the HUD's readouts (HP/MP block, radar, weapon supply, a targeted
+/// enemy's HP) are drawn this frame. Only their drawing is left out: the
+/// displayed HP/MP still follow the live stats, and the Parasite Energy wheel
+/// and cast gauge, which the player works, are always drawn.
+static inline s32 pcHudShown(s32 inBattle)
+{
+    s32 mode = pc_hud_mode();
+
+    return mode == PC_HUD_DEFAULT || (mode == PC_HUD_BATTLE_ONLY && inBattle != 0);
+}
+#endif
+
 #endif // GAMEPLAY_PRIVATE_HUD_H

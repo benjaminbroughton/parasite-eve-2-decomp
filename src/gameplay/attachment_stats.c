@@ -602,6 +602,11 @@ static void _hudDrawWeaponSupplyPrompt(s32 unusedPanelX, s32 unusedPanelY)
     if (gGameSession->hideHud != 0) {
         return;
     }
+#ifdef PC_PORT
+    if (pc_hud_mode() == PC_HUD_OFF) {
+        return;
+    }
+#endif
     if (player->weapon == PLAYER_STATUS_EQUIPMENT_NONE) {
         return;
     }
@@ -2033,6 +2038,9 @@ void hudUpdateAndDraw(HudState* hud)
                 session = gGameSession;
                 if (session->hideHud == 0) {
                     if (session->sceneUpdatesPaused == 0) {
+#ifdef PC_PORT
+                        if (pcHudShown(hud->inBattle))
+#endif
                         hudDrawLockedTargetHp(&hud->targetHpReadout);
                     }
                 }
