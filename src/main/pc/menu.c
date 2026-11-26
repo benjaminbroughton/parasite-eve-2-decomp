@@ -113,8 +113,18 @@ static s32                   _gPcMenuState;
 static s32                   _gPcMenuThen;
 /* What each row of the pause dialog does (its rows depend on the game's state). */
 static s32 _gPcMenuPauseRows[5];
-/* The settings' category shown, its panel and its row list. */
-static s32       _gPcMenuCategory;
+/* A settings panel's view: the category shown, its row list, where a row's
+ * choice is drawn and each row's widest choice (content pixels). Two: the
+ * pause menu's, and the game's Option list's (pcOptionsUpdateSettingsRow),
+ * which the pause menu may open over. */
+typedef struct {
+    s32    category;
+    UiList list;
+    s32    choiceX;
+    s32    rowChoiceWidth[16];
+} PcMenuSettingsView;
+enum { PC_MENU_VIEW_PAUSE, PC_MENU_VIEW_OPTIONS };
+static PcMenuSettingsView _gPcMenuViews[2];
 // The menus' font has no < or >: its guillemets point instead.
 static u8        _gPcMenuCaretLeft[]  = "\xAB";
 static u8        _gPcMenuCaretRight[] = "\xBB";
@@ -124,10 +134,6 @@ enum { PC_MENU_CARET_GAP_PIXELS = 3 };
 static UiObject* _gPcMenuPanel;
 static void      _pcMenuDrawSettingRow(UiList* list, UiObject* object);
 static UiListRowCallback _gPcMenuSettingRowCallbacks[] = { _pcMenuDrawSettingRow };
-static UiList    _gPcMenuSettingList;
-/* Where a row's choice is drawn, and each row's widest choice (content pixels). */
-static s32 _gPcMenuChoiceX;
-static s32 _gPcMenuRowChoiceWidth[16];
 /* The game's last picture, shown dimmed behind the menu. */
 static u16      _gPcMenuScreen[DISPLAY_SCREEN_WIDTH * DISPLAY_SCREEN_HEIGHT];
 static TILE     _gPcMenuDimTile;
@@ -238,7 +244,8 @@ static void _pcMenuOpenCategories(void)
         labels[i] = (u8*)pc_options_category(i, 0);
     }
     // Back from a category, on that category.
-    _pcMenuOpenDialog(_gPcMenuOptionsTitle, labels, count, _gPcMenuCategory < count ? _gPcMenuCategory : 0);
+    _pcMenuOpenDialog(_gPcMenuOptionsTitle, labels, count,
+                      _gPcMenuViews[PC_MENU_VIEW_PAUSE].category < count ? _gPcMenuViews[PC_MENU_VIEW_PAUSE].category : 0);
     _gPcMenuState = PC_MENU_CATEGORIES;
 }
 
@@ -252,14 +259,17 @@ static void _pcMenuDrawSettingRow(UiList* list, UiObject* object)
     s32       y;
     u32       dim;
     const u8* choice;
+    PcMenuSettingsView* view;
 
-    row = list->currentItemIndex;
+    // The view whose list this is.
+    view = &_gPcMenuViews[list == &_gPcMenuViews[PC_MENU_VIEW_OPTIONS].list];
+    row  = list->currentItemIndex;
     y   = list->rowTextY.signedValue;
     x   = object->panel.contentLeft.signedValue;
     dim = uiGetTextColor(object, USER_INTERFACE_TEXT_COLOR_DIMMED);
-    textDrawUiLine(object, x + 6, y, pc_options_label(_gPcMenuCategory, row), list->colorRgb, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
-    x += _gPcMenuChoiceX;
-    choice = pc_options_choice(_gPcMenuCategory, row, -1);
+    textDrawUiLine(object, x + 6, y, pc_options_label(view->category, row), list->colorRgb, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+    x += view->choiceX;
+    choice = pc_options_choice(view->category, row, -1);
     if (list->selectedItemIndex == row) {
         textDrawUiLine(object, x, y, _gPcMenuCaretLeft, dim, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
         textDrawUiLine(object, x + _gPcMenuCaretWidth + textMeasureLineWidth(choice) + PC_MENU_CARET_GAP_PIXELS, y,
@@ -267,17 +277,17 @@ static void _pcMenuDrawSettingRow(UiList* list, UiObject* object)
     }
     textDrawUiLine(object, x + _gPcMenuCaretWidth, y, choice, uiGetTextColor(object, USER_INTERFACE_TEXT_COLOR_NORMAL),
                    TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
-    if (pc_options_needs_restart(_gPcMenuCategory, row, 0)) {
-        textDrawUiLine(object, x + 2 * _gPcMenuCaretWidth + _gPcMenuRowChoiceWidth[row] + 4, y, pc_options_restart_text(),
+    if (pc_options_needs_restart(view->category, row, 0)) {
+        textDrawUiLine(object, x + 2 * _gPcMenuCaretWidth + view->rowChoiceWidth[row] + 4, y, pc_options_restart_text(),
                        dim, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
     }
     if (list->rowInputEnabled == USER_INTERFACE_LIST_ROW_ACTIVE) {
         if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, PAD_BUTTON_RIGHT) != 0) {
             sndEvtRequestScriptStart(SOUND_MENU_CURSOR, 0, 0);
-            pc_options_change(_gPcMenuCategory, row, 1);
+            pc_options_change(view->category, row, 1);
         } else if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, PAD_BUTTON_LEFT) != 0) {
             sndEvtRequestScriptStart(SOUND_MENU_CURSOR, 0, 0);
-            pc_options_change(_gPcMenuCategory, row, -1);
+            pc_options_change(view->category, row, -1);
         }
     }
 }
@@ -305,11 +315,13 @@ static void _pcMenuUpdateSettingsTask(Task* owningTask)
     s32        rowWidth;
     s32        widest;
     s32        gap;
+    PcMenuSettingsView* view;
 
     object = owningTask->spawnArg2.pointer;
-    list   = &_gPcMenuSettingList;
+    view   = &_gPcMenuViews[owningTask->spawnArg1.value == PC_MENU_VIEW_OPTIONS];
+    list   = &view->list;
     if (owningTask->state == 0) {
-        rows                            = pc_options_count(_gPcMenuCategory);
+        rows                            = pc_options_count(view->category);
         list->rowCallbacks              = _gPcMenuSettingRowCallbacks;
         list->itemCount                 = rows;
         list->visibleRowCount.unsignedValue = rows;
@@ -320,27 +332,27 @@ static void _pcMenuUpdateSettingsTask(Task* owningTask)
         list->flags = USER_INTERFACE_LIST_SHARED_ROW_CALLBACK;
         // Columns: the widest label, then each row's widest choice, with
         // "(restart)" after it on a row that may need one.
-        if (rows > ARRAY_SIZE(_gPcMenuRowChoiceWidth)) {
-            rows = ARRAY_SIZE(_gPcMenuRowChoiceWidth);
+        if (rows > ARRAY_SIZE(view->rowChoiceWidth)) {
+            rows = ARRAY_SIZE(view->rowChoiceWidth);
         }
         restartWidth       = textMeasureLineWidth(pc_options_restart_text());
         _gPcMenuCaretWidth = textMeasureLineWidth(_gPcMenuCaretLeft) + PC_MENU_CARET_GAP_PIXELS;
         labelWidth         = 0;
         rowWidth           = 0;
         for (row = 0; row < rows; row++) {
-            width = textMeasureLineWidth(pc_options_label(_gPcMenuCategory, row));
+            width = textMeasureLineWidth(pc_options_label(view->category, row));
             if (labelWidth < width) {
                 labelWidth = width;
             }
-            _gPcMenuRowChoiceWidth[row] = 0;
-            for (choice = 0; (text = pc_options_choice(_gPcMenuCategory, row, choice)) != NULL; choice++) {
+            view->rowChoiceWidth[row] = 0;
+            for (choice = 0; (text = pc_options_choice(view->category, row, choice)) != NULL; choice++) {
                 width = textMeasureLineWidth(text);
-                if (_gPcMenuRowChoiceWidth[row] < width) {
-                    _gPcMenuRowChoiceWidth[row] = width;
+                if (view->rowChoiceWidth[row] < width) {
+                    view->rowChoiceWidth[row] = width;
                 }
             }
-            width = 2 * _gPcMenuCaretWidth + _gPcMenuRowChoiceWidth[row];
-            if (pc_options_needs_restart(_gPcMenuCategory, row, 1)) {
+            width = 2 * _gPcMenuCaretWidth + view->rowChoiceWidth[row];
+            if (pc_options_needs_restart(view->category, row, 1)) {
                 width += 4 + restartWidth;
             }
             if (rowWidth < width) {
@@ -359,23 +371,28 @@ static void _pcMenuUpdateSettingsTask(Task* owningTask)
                 gap = PC_MENU_COLUMN_GAP_MIN_PIXELS;
             }
         }
-        _gPcMenuChoiceX = 6 + labelWidth + gap;
-        if (_gPcMenuChoiceX + rowWidth + 6 > widest) {
-            _gPcMenuChoiceX = widest - rowWidth - 6;
+        view->choiceX = 6 + labelWidth + gap;
+        if (view->choiceX + rowWidth + 6 > widest) {
+            view->choiceX = widest - rowWidth - 6;
         }
-        uiSetPanelContentSize(&object->panel, _gPcMenuChoiceX + rowWidth + 6, 0);
+        uiSetPanelContentSize(&object->panel, view->choiceX + rowWidth + 6, 0);
         object->panel.bounds.rect.x = -(object->panel.bounds.rect.w / 2);
         object->panel.bounds.rect.y = -(object->panel.bounds.rect.h / 2);
-        _pcMenuFitTitle(&object->panel, pc_options_category(_gPcMenuCategory, 1));
+        _pcMenuFitTitle(&object->panel, pc_options_category(view->category, 1));
         owningTask->state = 1;
     }
     object->result = USER_INTERFACE_RESULT_NONE;
-    uiDrawPanelLabel(&object->panel, (const char*)pc_options_category(_gPcMenuCategory, 1));
+    uiDrawPanelLabel(&object->panel, (const char*)pc_options_category(view->category, 1));
     uiUpdateList(list, &object->panel);
-    if (object->panel.control.word == USER_INTERFACE_PANEL_ACTIVE &&
-        padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadCancelButtonMask) != 0) {
-        sndEvtRequestScriptStart(SOUND_MENU_CANCEL, 0, 0);
-        object->result = USER_INTERFACE_RESULT_CONFIRM;
+    if (object->panel.control.word == USER_INTERFACE_PANEL_ACTIVE) {
+        if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadCancelButtonMask) != 0) {
+            sndEvtRequestScriptStart(SOUND_MENU_CANCEL, 0, 0);
+            object->result = USER_INTERFACE_RESULT_CONFIRM;
+        } else if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadMenuButtonMask) != 0) {
+            // In the game's options: the Menu button leaves the whole menu,
+            // as there (the pause menu ignores it).
+            object->result = USER_INTERFACE_RESULT_CANCEL;
+        }
     }
 }
 
@@ -395,6 +412,131 @@ static void _pcMenuOpenSettings(void)
     _gPcMenuPanel = uiSpawnObject(&_gPcMenuSettingsDesc, none, USER_INTERFACE_PANEL_ACTIVE, 1, NULL);
     taskSetActiveList(previous);
     _gPcMenuState = PC_MENU_SETTINGS;
+}
+
+/* PE2PC's settings in the game's own Option list (options.c): a row opening
+ * a panel of the categories, each opening the settings panel above, as the
+ * list's Key Config row opens its chart. */
+static u8 _gPcMenuSettingsText[]   = "PC Settings";
+static u8 _gPcMenuSettingsTitle[]  = "PC SETTINGS";
+static u8 _gPcMenuSettingsPrompt[] = "Open PE2PC's own settings.\nPress the } button to proceed.";
+static void    _pcMenuDrawCategoryRow(UiList* list, UiObject* object);
+static UiListRowCallback _gPcMenuCategoryRowCallbacks[] = { _pcMenuDrawCategoryRow };
+static UiList  _gPcMenuCategoryList;
+
+/// Draws a category row; Confirm opens its settings over the panel.
+static void _pcMenuDrawCategoryRow(UiList* list, UiObject* object)
+{
+    TaskSpawnArg none;
+    s32          row;
+
+    row = list->currentItemIndex;
+    textDrawUiLine(object, object->panel.contentLeft.signedValue + 6, list->rowTextY.signedValue, pc_options_category(row, 0),
+                   list->colorRgb, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+    if (list->rowInputEnabled == USER_INTERFACE_LIST_ROW_ACTIVE &&
+        padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadConfirmButtonMask) != 0) {
+        sndEvtRequestScriptStart(SOUND_MENU_CONFIRM, 0, 0);
+        _gPcMenuViews[PC_MENU_VIEW_OPTIONS].category = row;
+        none.value = PC_MENU_VIEW_OPTIONS;
+        uiSpawnObject(&_gPcMenuSettingsDesc, none, USER_INTERFACE_PANEL_ACTIVE, 1, object);
+        object->panel.control.word = USER_INTERFACE_PANEL_INACTIVE;
+    }
+}
+
+/// The categories panel's task, as the game's options panel's: Cancel
+/// publishes a confirm (back to the Option list), Menu a cancel (out of the
+/// menu); a settings panel closing writes the settings and comes back here.
+static void _pcMenuUpdateCategoriesTask(Task* owningTask)
+{
+    enum { PC_MENU_CATEGORY_ROW_HEIGHT_PIXELS = 16 };
+    UiObject* object;
+    UiObject* child;
+    UiList*   list;
+    s32       count;
+    s32       row;
+    s32       width;
+    s32       widest;
+
+    object = owningTask->spawnArg2.pointer;
+    list   = &_gPcMenuCategoryList;
+    if (owningTask->state == 0) {
+        count = pc_options_categories();
+        list->rowCallbacks                  = _gPcMenuCategoryRowCallbacks;
+        list->itemCount                     = count;
+        list->visibleRowCount.unsignedValue = count;
+        list->wrapNavigation                = 0;
+        list->rowHeight                     = PC_MENU_CATEGORY_ROW_HEIGHT_PIXELS;
+        list->selectedItemIndex             = _gPcMenuViews[PC_MENU_VIEW_OPTIONS].category < count ? _gPcMenuViews[PC_MENU_VIEW_OPTIONS].category : 0;
+        uiFitPanelToList(list, &object->panel);
+        list->flags = USER_INTERFACE_LIST_SHARED_ROW_CALLBACK;
+        widest      = 0;
+        for (row = 0; row < count; row++) {
+            width = textMeasureLineWidth(pc_options_category(row, 0));
+            if (widest < width) {
+                widest = width;
+            }
+        }
+        uiSetPanelContentSize(&object->panel, 6 + widest + 24, 0);
+        object->panel.bounds.rect.x = -(object->panel.bounds.rect.w / 2);
+        object->panel.bounds.rect.y = -(object->panel.bounds.rect.h / 2);
+        _pcMenuFitTitle(&object->panel, _gPcMenuSettingsTitle);
+        owningTask->state = 1;
+    }
+    object->result = USER_INTERFACE_RESULT_NONE;
+    uiDrawPanelLabel(&object->panel, (const char*)_gPcMenuSettingsTitle);
+    uiUpdateList(list, &object->panel);
+    if (object->panel.control.word == USER_INTERFACE_PANEL_ACTIVE) {
+        if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadCancelButtonMask) != 0) {
+            sndEvtRequestScriptStart(SOUND_MENU_CANCEL, 0, 0);
+            object->result = USER_INTERFACE_RESULT_CONFIRM;
+        } else if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadMenuButtonMask) != 0) {
+            object->result = USER_INTERFACE_RESULT_CANCEL;
+        }
+    }
+    if (owningTask->firstChild != NULL) {
+        child = owningTask->firstChild->spawnArg2.pointer;
+        switch (child->result) {
+            case USER_INTERFACE_RESULT_CONFIRM:
+                pc_options_save();
+                uiStartTreeClosing(child, child->owner);
+                object->panel.control.word = USER_INTERFACE_PANEL_ACTIVE;
+                break;
+            case USER_INTERFACE_RESULT_CANCEL:
+                pc_options_save();
+                object->result = USER_INTERFACE_RESULT_CANCEL;
+                break;
+        }
+    }
+}
+
+/// The categories panel's recipe: in front of the Option list (OT 56) and
+/// behind the settings panel it opens (32).
+static UiObjectDesc _gPcMenuCategoriesDesc = {
+    USER_INTERFACE_PANEL_TITLE_STYLE, { -80, -60, 160, 120 }, 44, 0, TASK_BODY_NONE, TASK_PRIORITY_CONTROL, _pcMenuUpdateCategoriesTask, 0
+};
+
+/// The game's Option list's PE2PC row (options.c, native builds): drawn as
+/// its Key Config row, Confirm opening the categories over the list, which
+/// handles the child's results as it does the key chart's.
+void pcOptionsUpdateSettingsRow(UiList* list, UiObject* object)
+{
+    TaskSpawnArg none;
+    s32          controlMode;
+
+    textDrawUiLine(object, object->panel.contentLeft.signedValue + 6, list->rowTextY.signedValue, _gPcMenuSettingsText,
+                   list->colorRgb, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+    controlMode = object->panel.control.word;
+    if (((controlMode >> 16) == USER_INTERFACE_PANEL_ACTIVE || controlMode == USER_INTERFACE_PANEL_ACTIVE) &&
+        list->selectedItemIndex == list->currentItemIndex) {
+        uiSetPromptText(_gPcMenuSettingsPrompt, 0, 0);
+    }
+    if (list->rowInputEnabled == USER_INTERFACE_LIST_ROW_ACTIVE &&
+        padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadConfirmButtonMask) != 0) {
+        sndEvtRequestScriptStart(SOUND_MENU_CONFIRM, 0, 0);
+        none.value = 0;
+        uiSpawnObject(&_gPcMenuCategoriesDesc, none, USER_INTERFACE_PANEL_ACTIVE, 1, object);
+        object->panel.control.word = USER_INTERFACE_PANEL_INACTIVE;
+    }
 }
 
 /// Opens the game's save (as a telephone's) over the held game.
@@ -456,7 +598,7 @@ static void _pcMenuOpen(void)
     _gPcMenuTasks.prev = &_gPcMenuTasks;
     pcUiSaveState();
     sndEvtRequestScriptDuckAcquire();
-    _gPcMenuCategory = 0;
+    _gPcMenuViews[PC_MENU_VIEW_PAUSE].category = 0;
     _gPcMenuThen = PC_MENU_THEN_NOTHING;
     _pcMenuOpenPause();
 }
@@ -476,7 +618,7 @@ static void _pcMenuAnswer(s32 result)
             break;
         case PC_MENU_CATEGORIES:
             if (result > 0) {
-                _gPcMenuCategory = result - 1;
+                _gPcMenuViews[PC_MENU_VIEW_PAUSE].category = result - 1;
                 _gPcMenuThen     = PC_MENU_THEN_SETTINGS;
             } else {
                 _gPcMenuThen = PC_MENU_THEN_PAUSE;
@@ -648,6 +790,7 @@ const u8* const* pcMenuTexts(s32* count)
 {
     static const u8* const texts[] = {
         _gPcMenuPauseTitle, _gPcMenuResumeText, _gPcMenuSaveText, _gPcMenuOptionsText, gPcTextMovedToBox, gPcTextQuantity, gPcTextSetNumber, gPcTextLevel, _gPcMenuToTitleText, _gPcMenuQuitGameText, _gPcMenuTitleTitle, _gPcMenuQuitTitle, _gPcMenuNoText, _gPcMenuYesText,
+        _gPcMenuSettingsText, _gPcMenuSettingsTitle, _gPcMenuSettingsPrompt,
     };
 
     *count = ARRAY_SIZE(texts);
