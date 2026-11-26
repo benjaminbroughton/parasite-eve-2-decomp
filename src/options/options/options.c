@@ -148,6 +148,9 @@ static void _optionsUpdateMovementRow(UiList* list, UiObject* object);
 static void _optionsUpdateKeyConfigurationRow(UiList* list, UiObject* object);
 static void _optionsUpdateRestoreDefaultsRow(UiList* list, UiObject* object);
 static void _optionsUpdateKeyConfigurationTask(Task* owningTask);
+#ifdef PC_PORT
+void pcOptionsUpdateSettingsRow(UiList* list, UiObject* object);
+#endif
 
 /// Empty NUL-terminated prompt for the key-layout fallback.
 static const u8 _gOptionsKeyEmptyPrompt[] __attribute__((section(".data"), aligned(4))) = "";
@@ -189,6 +192,30 @@ static UiList _gOptionsMenuList = {
     OPTIONS_MENU_ROW_HEIGHT_PIXELS
 };
 
+#ifdef PC_PORT
+/// The full list with PE2PC's own settings (main/pc/menu.c) after Key
+/// Config, opened as its chart is. Native only: the overlay's data is the
+/// disc's copy in PSX RAM (the port's pclink), so the table above stays the
+/// game's seven rows and the panel uses this one instead.
+static UiListRowCallback _gPcOptionsMenuRowCallbacks[] = {
+    _optionsUpdateSoundRow,
+    _optionsUpdateMusicVolumeRow,
+    _optionsUpdateCursorRow,
+    _optionsUpdateVibrationRow,
+    _optionsUpdateMovementRow,
+    _optionsUpdateKeyConfigurationRow,
+    pcOptionsUpdateSettingsRow,
+    _optionsUpdateRestoreDefaultsRow,
+};
+static UiList _gPcOptionsMenuList = {
+    _gPcOptionsMenuRowCallbacks,
+    ARRAY_SIZE(_gPcOptionsMenuRowCallbacks),
+    ARRAY_SIZE(_gPcOptionsMenuRowCallbacks),
+    OPTIONS_LIST_CLAMP_NAVIGATION,
+    OPTIONS_MENU_ROW_HEIGHT_PIXELS
+};
+#endif
+
 /// Callback table for the vibration-only panel's sole row.
 ///
 /// Entry zero follows `UiListRowCallback`'s input and borrowing contract.
@@ -207,6 +234,19 @@ static UiList _gOptionsVibrationList = {
     OPTIONS_LIST_CLAMP_NAVIGATION,
     OPTIONS_VIBRATION_ROW_HEIGHT_PIXELS
 };
+
+#ifdef PC_PORT
+/// The title screen's Option panel with PE2PC's own settings after
+/// Vibration; native only, as `_gPcOptionsMenuList`.
+static UiListRowCallback _gPcOptionsVibrationRowCallbacks[] = { _optionsUpdateVibrationRow, pcOptionsUpdateSettingsRow };
+static UiList _gPcOptionsVibrationList = {
+    _gPcOptionsVibrationRowCallbacks,
+    ARRAY_SIZE(_gPcOptionsVibrationRowCallbacks),
+    ARRAY_SIZE(_gPcOptionsVibrationRowCallbacks),
+    OPTIONS_LIST_CLAMP_NAVIGATION,
+    OPTIONS_VIBRATION_ROW_HEIGHT_PIXELS
+};
+#endif
 
 /// Read-only spawn recipe for the options panel's key-configuration child.
 ///
@@ -623,9 +663,15 @@ void optionsUpdateMenuTask(Task* owningTask)
     s32       childResult;
 
     list   = &_gOptionsMenuList;
+#ifdef PC_PORT
+    list = &_gPcOptionsMenuList;
+#endif
     object = owningTask->spawnArg2.pointer;
     if (owningTask->spawnArg1.value == OPTIONS_MENU_VIBRATION_ONLY) {
         list = &_gOptionsVibrationList;
+#ifdef PC_PORT
+        list = &_gPcOptionsVibrationList;
+#endif
     }
     // Fit once; only the vibration layout explicitly centers the outer bounds.
     if (owningTask->state == OPTIONS_MENU_TASK_INITIAL) {
