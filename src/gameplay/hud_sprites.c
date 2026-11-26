@@ -467,6 +467,11 @@ void hudDrawRadar(HudState* hud)
     SPRT*                           rangeSprite;
     POLY_GT4*                       radarQuad;
 
+#ifdef PC_PORT
+    if (!pcHudShown(hud->inBattle)) {
+        return;
+    }
+#endif
     radarX  = 0x61;
     radarY  = -0x6C;
     radarY -= gDisplayState.vramYOffset;

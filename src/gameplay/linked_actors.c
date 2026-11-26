@@ -544,6 +544,11 @@ void hudDrawStatusBlock(const HudState* hud)
     _hudStepDisplayedStat(&gHudDisplayedVitals.hp, playerStatus->hp);
     displayedStats = &gHudDisplayedVitals;
     _hudStepDisplayedStat(&displayedStats->mp, playerStatus->mp);
+#ifdef PC_PORT
+    if (!pcHudShown(hud->inBattle)) {
+        return;
+    }
+#endif
 
     x  = HUD_STATUS_BLOCK_LEFT;
     y  = HUD_STATUS_BLOCK_TOP;
