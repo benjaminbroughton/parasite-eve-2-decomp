@@ -41,6 +41,7 @@
 extern void pc_menu_available(s32 available);
 extern s32 pc_menu_requested(void);
 extern void pc_menu_taken(void);
+extern void pc_widescreen_field(s32 field);
 extern s32 pc_menu_confirms_quit(void);
 extern void pc_menu_quit(void);
 
@@ -581,6 +582,9 @@ s32 pcMenuFrame(s32 blocked)
     // Whether the game draws its own frames, where the menu can open (a
     // moment's block aside): elsewhere the host asks to quit at once.
     pc_menu_available(_pcMenuAvailable());
+    // Widescreen: 1 in live field play, 2 there for a moment's block, 3 with
+    // the menu open, 0 other frames (as across a camera cut, or a load).
+    pc_widescreen_field(_gPcMenuState != PC_MENU_CLOSED ? 3 : _pcMenuCanOpen(blocked) ? 1 : _pcMenuAvailable() ? 2 : 0);
     if (_gPcMenuState == PC_MENU_CLOSED) {
         if (!pc_menu_requested() || !_pcMenuCanOpen(blocked)) {
             return 0;
