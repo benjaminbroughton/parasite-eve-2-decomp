@@ -169,6 +169,21 @@ static inline void _capUpdateChoiceSelection(void)
 #ifdef PC_PORT
 /* The options a replay keeps (controls.rs): bit 4 instant text. */
 extern u32 pc_input_options(void);
+
+/* Voiced lines (voice.rs, prototype): a mod's clip starts with a line and
+ * stops when it is left; a timed line is held while its clip plays. */
+extern void pc_cap_voice_line(const void* file, const void* record);
+extern void pc_cap_voice_stop(void);
+extern s32  pc_cap_voice_playing(void);
+
+/// The record whose clip was last started, so each line starts it once.
+static const CapSequenceRecord* _pcCapVoiceRecord;
+
+static void _pcCapVoiceStop(void)
+{
+    _pcCapVoiceRecord = NULL;
+    pc_cap_voice_stop();
+}
 #endif
 
 void capUpdatePlaybackTask(Task* task)
@@ -372,6 +387,12 @@ void capUpdatePlaybackTask(Task* task)
             return;
         }
     } else {
+#ifdef PC_PORT
+        if (_pcCapVoiceRecord != &gCapSelectedSequence[(s16)gCapRecordIndex]) {
+            _pcCapVoiceRecord = &gCapSelectedSequence[(s16)gCapRecordIndex];
+            pc_cap_voice_line(gCapFile, _pcCapVoiceRecord);
+        }
+#endif
         if (gCapRecordSoundIssued == CAP_RECORD_SOUND_NOT_ISSUED) {
             if (gCapSelectedSequence[(s16)gCapRecordIndex].trigger.soundAndTextFlags & CAP_SEQUENCE_SOUND_ID_MASK) {
                 taskMessageDispatch(gameGetTaskSlot(GAME_TASK_SLOT_ROOM), ROOM_MESSAGE_SOUND, (gCapSelectedSequence[(s16)gCapRecordIndex].trigger.soundAndTextFlags >> 1), 0);
@@ -444,6 +465,12 @@ void capUpdatePlaybackTask(Task* task)
         } else if (gCapRecordPhase == CAP_RECORD_WAIT) {
             // Completed text either observes frame waits or accepts a choice/continue.
             if (gCapSelectedSequence[(s16)gCapRecordIndex].control.packed & CAP_SEQUENCE_TIMING_MASK) {
+#ifdef PC_PORT
+                /* A timed line stays up until its voice clip has finished. */
+                if ((gCapDisplayFramesRemaining == 0) && pc_cap_voice_playing()) {
+                    gCapDisplayFramesRemaining = 1;
+                }
+#endif
                 if (gCapDisplayFramesRemaining != 0) {
                     _capDrawTextStream(gCapSelectedSequence[(s16)gCapRecordIndex].textRef.text, CAP_PLAYBACK_UNUSED_TEXT_DRAW_ARG, 1, gCapSelectedSequence[(s16)gCapRecordIndex].control.text.title | ((gCapSelectedSequence[(s16)gCapRecordIndex].control.text.flags & (CAP_SEQUENCE_LEFT_ALIGN | CAP_SEQUENCE_TITLE_BANK)) << CAP_TEXT_TITLE_FLAGS_SHIFT));
                     gCapDisplayFramesRemaining = (u16)gCapDisplayFramesRemaining - 1;
@@ -1043,6 +1070,9 @@ static void _capFinishPlayback(Task* task)
     CdCmdQueue* cdQueue;
     char        sceneFilename[0x20];
 
+#ifdef PC_PORT
+    _pcCapVoiceStop();
+#endif
     // Send the action-capture exit message before restoring the display mode.
     cdQueue = &gCdCmdQueue;
     if (gCapPlaybackMode == CAP_PLAYBACK_ACTION_CAPTURE) {
@@ -1372,6 +1402,9 @@ void capReset(void)
         CAP_DEFAULT_TEXTURE_VRAM_Y = 0
     };
 
+#ifdef PC_PORT
+    _pcCapVoiceStop();
+#endif
     // Release the selection before restoring the bundle's default CAP resource.
     gCapSelectedSequence     = NULL;
     gCapConfirmedChoiceIndex = 0;
@@ -1510,6 +1543,9 @@ static void _capAdvanceRecord(void)
 {
     enum { CAP_CONTINUE_CARET_DELAY_CALLS = 30 };
 
+#ifdef PC_PORT
+    _pcCapVoiceStop();
+#endif
     gCapRecordIndex++;
     gCapRecordIndex                  = capFindVariantRecord((s16)gCapRecordIndex);
     gCapRecordSoundIssued            = CAP_RECORD_SOUND_NOT_ISSUED;
