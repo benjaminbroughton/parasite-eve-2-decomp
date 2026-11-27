@@ -32,6 +32,9 @@
 #include "main/text.h"
 #include "main/ui.h"
 #include "main/ui_types.h"
+#include "main/session.h"
+#include "main/wipsys.h"
+#include "gameplay/companion_load.h"
 #include "../display.h"
 #include "../fs.h"
 #include "../mc.h"
@@ -43,6 +46,8 @@ extern s32 pc_menu_requested(void);
 extern void pc_menu_taken(void);
 extern s32 pc_menu_confirms_quit(void);
 extern void pc_menu_quit(void);
+/* The debug menu is on ([debug] menu, PE2_DEBUG_MENU; pause_menu.rs). */
+extern s32 pc_debug_menu(void);
 
 /* The host's settings (settings.rs): categories, their rows, each row's
  * label and choices (NULL past the last; -1 the current one). */
@@ -69,6 +74,7 @@ enum {
     PC_MENU_CATEGORIES,
     PC_MENU_SETTINGS,
     PC_MENU_SAVE,
+    PC_MENU_DEBUG,
 };
 
 /* What happens once the menu's dialogs have closed. */
@@ -83,6 +89,8 @@ enum {
     PC_MENU_THEN_CATEGORIES,
     PC_MENU_THEN_SETTINGS,
     PC_MENU_THEN_SAVE,
+    PC_MENU_THEN_DEBUG,
+    PC_MENU_THEN_WARP,
 };
 
 static u8 _gPcMenuPauseTitle[]    = "PAUSE";
@@ -111,7 +119,7 @@ static UiObject*             _gPcMenuDialog;
 static s32                   _gPcMenuState;
 static s32                   _gPcMenuThen;
 /* What each row of the pause dialog does (its rows depend on the game's state). */
-static s32 _gPcMenuPauseRows[5];
+static s32 _gPcMenuPauseRows[6];
 /* A settings panel's view: the category shown, its row list, where a row's
  * choice is drawn and each row's widest choice (content pixels). Two: the
  * pause menu's, and the game's Option list's (pcOptionsUpdateSettingsRow),
@@ -205,9 +213,360 @@ static void _pcMenuOpenDialog(u8* title, u8** labels, s32 count, s32 selected)
     }
 }
 
+/* ---- The debug menu ([debug] menu): a panel of the pause menu's for
+ * testing. Stage, Room and Entrance pick a place (Left and Right), Go to
+ * room travels there as the game's own scripted transitions do (the live
+ * save's location, then the session reload task); the other rows act at
+ * once. The rooms are every room folder with a warp table, generated from
+ * include/main/areas.h and the rooms' symbol maps. ---- */
+
+typedef struct {
+    u8          stage;
+    u8          area;
+    u8          entrances; // The room's warp table entries (the arrival points)
+    const char* name;
+} PcDebugRoom;
+
+static const PcDebugRoom _gPcDebugRooms[] = {
+#include "debug_rooms.inc"
+};
+
+static u8 _gPcMenuDebugText[]  = "Debug";
+static u8 _gPcMenuDebugTitle[] = "DEBUG";
+
+enum {
+    PC_DEBUG_ROW_STAGE,
+    PC_DEBUG_ROW_ROOM,
+    PC_DEBUG_ROW_ENTRANCE,
+    PC_DEBUG_ROW_GO,
+    PC_DEBUG_ROW_REFILL,
+    PC_DEBUG_ROW_CURE,
+    PC_DEBUG_ROW_BP,
+    PC_DEBUG_ROW_EXP,
+    PC_DEBUG_ROW_COUNT,
+};
+
+static const char* const _gPcDebugRowLabels[PC_DEBUG_ROW_COUNT] = {
+    "Stage", "Room", "Entrance", "Go to room", "Refill HP/MP", "Cure status", "BP +10000", "EXP +10000",
+};
+
+static const char* const _gPcDebugStageNames[] = {
+    "", "Akropolis", "Dryfield", "Dryfield (night)", "Mine and Shelter", "Shelter and Neo Ark",
+};
+
+/* The place picked (an index into _gPcDebugRooms, and a zero-based
+ * entrance), the panel, its row list and where its choices are drawn. */
+static s32       _gPcDebugRoom;
+static s32       _gPcDebugEntrance;
+static UiObject* _gPcMenuDebugPanel;
+static UiList    _gPcDebugList;
+static s32       _gPcDebugChoiceX;
+static s32       _gPcDebugGo;
+static u8        _gPcDebugEntranceText[8];
+static void      _pcMenuDrawDebugRow(UiList* list, UiObject* object);
+static UiListRowCallback _gPcDebugRowCallbacks[] = { _pcMenuDrawDebugRow };
+
+/// Whether the debug menu shows: on, and in a game (gameplay loaded, a stage).
+static s32 _pcMenuCanDebug(void)
+{
+    return pc_debug_menu() && gDisplayState.gameMode == DISPLAY_GAME_ACTIVE && gDisplayState.gameRunning != 0 &&
+           gGameSession != NULL && gGameSession->location.stage != 0;
+}
+
+/// The picked room's index moved by `delta` within its stage, wrapping.
+static s32 _pcDebugStepRoom(s32 room, s32 delta)
+{
+    s32 count;
+    s32 stage;
+
+    count = ARRAY_SIZE(_gPcDebugRooms);
+    stage = _gPcDebugRooms[room].stage;
+    do {
+        room = (room + delta + count) % count;
+    } while (_gPcDebugRooms[room].stage != stage);
+    return room;
+}
+
+/// The first room of the stage `delta` stages on, wrapping.
+static s32 _pcDebugStepStage(s32 room, s32 delta)
+{
+    s32 count;
+    s32 stage;
+    s32 i;
+
+    count = ARRAY_SIZE(_gPcDebugRooms);
+    stage = _gPcDebugRooms[room].stage;
+    stage = (stage - 1 + delta + 5) % 5 + 1;
+    for (i = 0; i < count; i++) {
+        if (_gPcDebugRooms[i].stage == stage) {
+            return i;
+        }
+    }
+    return room;
+}
+
+/// The row's current choice, as text.
+static const u8* _pcDebugChoice(s32 row)
+{
+    const PcDebugRoom* room;
+    s32                n;
+    s32                i;
+
+    room = &_gPcDebugRooms[_gPcDebugRoom];
+    switch (row) {
+        case PC_DEBUG_ROW_STAGE:
+            return (const u8*)_gPcDebugStageNames[room->stage];
+        case PC_DEBUG_ROW_ROOM:
+            return (const u8*)room->name;
+        case PC_DEBUG_ROW_ENTRANCE:
+            // "N of M", without printf.
+            i = 0;
+            n = _gPcDebugEntrance + 1;
+            if (n >= 10) {
+                _gPcDebugEntranceText[i++] = '0' + n / 10;
+            }
+            _gPcDebugEntranceText[i++] = '0' + n % 10;
+            _gPcDebugEntranceText[i++] = '/';
+            n = room->entrances;
+            if (n >= 10) {
+                _gPcDebugEntranceText[i++] = '0' + n / 10;
+            }
+            _gPcDebugEntranceText[i++] = '0' + n % 10;
+            _gPcDebugEntranceText[i]   = 0;
+            return _gPcDebugEntranceText;
+    }
+    return NULL;
+}
+
+/// A row's Confirm: the actions (Go to room closes the menu).
+static void _pcDebugAct(UiObject* object, s32 row)
+{
+    switch (row) {
+        case PC_DEBUG_ROW_GO:
+            _gPcDebugGo    = 1;
+            object->result = USER_INTERFACE_RESULT_CONFIRM;
+            break;
+        case PC_DEBUG_ROW_REFILL:
+            gPlayerStatus.hp = gPlayerStatus.hpMax;
+            gPlayerStatus.mp = gPlayerStatus.mpMax;
+            break;
+        case PC_DEBUG_ROW_CURE:
+            gPlayerStatus.statusFlags = 0;
+            break;
+        case PC_DEBUG_ROW_BP:
+            gPlayerStatus.bp += 10000;
+            break;
+        case PC_DEBUG_ROW_EXP:
+            gPlayerStatus.exp += 10000;
+            break;
+    }
+}
+
+/// Draws a debug row: its label, and for the pickers their choice between
+/// carets on the selected row (Left and Right change it); Confirm acts.
+static void _pcMenuDrawDebugRow(UiList* list, UiObject* object)
+{
+    s32       row;
+    s32       x;
+    s32       y;
+    s32       delta;
+    u32       dim;
+    const u8* choice;
+    const PcDebugRoom* room;
+
+    row    = list->currentItemIndex;
+    y      = list->rowTextY.signedValue;
+    x      = object->panel.contentLeft.signedValue;
+    dim    = uiGetTextColor(object, USER_INTERFACE_TEXT_COLOR_DIMMED);
+    textDrawUiLine(object, x + 6, y, (const u8*)_gPcDebugRowLabels[row], list->colorRgb, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+    choice = _pcDebugChoice(row);
+    if (choice != NULL) {
+        x += _gPcDebugChoiceX;
+        if (list->selectedItemIndex == row) {
+            textDrawUiLine(object, x, y, _gPcMenuCaretLeft, dim, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+            textDrawUiLine(object, x + _gPcMenuCaretWidth + textMeasureLineWidth(choice) + PC_MENU_CARET_GAP_PIXELS, y,
+                           _gPcMenuCaretRight, dim, TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+        }
+        textDrawUiLine(object, x + _gPcMenuCaretWidth, y, choice, uiGetTextColor(object, USER_INTERFACE_TEXT_COLOR_NORMAL),
+                       TEXT_DRAW_OUTLINED, TEXT_ALIGNMENT_LEFT);
+    }
+    if (list->rowInputEnabled != USER_INTERFACE_LIST_ROW_ACTIVE) {
+        return;
+    }
+    delta = 0;
+    if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, PAD_BUTTON_RIGHT) != 0) {
+        delta = 1;
+    } else if (padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, PAD_BUTTON_LEFT) != 0) {
+        delta = -1;
+    }
+    if (delta != 0 && choice != NULL) {
+        sndEvtRequestScriptStart(SOUND_MENU_CURSOR, 0, 0);
+        switch (row) {
+            case PC_DEBUG_ROW_STAGE:
+                _gPcDebugRoom     = _pcDebugStepStage(_gPcDebugRoom, delta);
+                _gPcDebugEntrance = 0;
+                break;
+            case PC_DEBUG_ROW_ROOM:
+                _gPcDebugRoom     = _pcDebugStepRoom(_gPcDebugRoom, delta);
+                _gPcDebugEntrance = 0;
+                break;
+            case PC_DEBUG_ROW_ENTRANCE:
+                room              = &_gPcDebugRooms[_gPcDebugRoom];
+                _gPcDebugEntrance = (_gPcDebugEntrance + delta + room->entrances) % room->entrances;
+                break;
+        }
+    } else if (choice == NULL && padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadConfirmButtonMask) != 0) {
+        sndEvtRequestScriptStart(SOUND_MENU_CONFIRM, 0, 0);
+        _pcDebugAct(object, row);
+    }
+}
+
+/// The debug panel's task, laid out as the settings panel's: fitted on its
+/// first update to the labels and the widest room name; Cancel publishes a
+/// confirm for the menu to close it.
+static void _pcMenuUpdateDebugTask(Task* owningTask)
+{
+    enum {
+        PC_DEBUG_ROW_HEIGHT_PIXELS = 16,
+        PC_DEBUG_COLUMN_GAP_PIXELS     = 16,
+        PC_DEBUG_COLUMN_GAP_MIN_PIXELS = 6,
+        PC_DEBUG_SCREEN_MARGIN_PIXELS  = 8,
+    };
+    UiObject* object;
+    UiList*   list;
+    s32       i;
+    s32       width;
+    s32       labelWidth;
+    s32       choiceWidth;
+    s32       rowWidth;
+    s32       widest;
+    s32       gap;
+
+    object = owningTask->spawnArg2.pointer;
+    list   = &_gPcDebugList;
+    if (owningTask->state == 0) {
+        list->rowCallbacks                  = _gPcDebugRowCallbacks;
+        list->itemCount                     = PC_DEBUG_ROW_COUNT;
+        list->visibleRowCount.unsignedValue = PC_DEBUG_ROW_COUNT;
+        list->wrapNavigation                = 0;
+        list->rowHeight                     = PC_DEBUG_ROW_HEIGHT_PIXELS;
+        list->selectedItemIndex             = 0;
+        uiFitPanelToList(list, &object->panel);
+        list->flags        = USER_INTERFACE_LIST_SHARED_ROW_CALLBACK;
+        _gPcMenuCaretWidth = textMeasureLineWidth(_gPcMenuCaretLeft) + PC_MENU_CARET_GAP_PIXELS;
+        labelWidth         = 0;
+        for (i = 0; i < PC_DEBUG_ROW_COUNT; i++) {
+            width = textMeasureLineWidth((const u8*)_gPcDebugRowLabels[i]);
+            if (labelWidth < width) {
+                labelWidth = width;
+            }
+        }
+        choiceWidth = 0;
+        for (i = 0; i < (s32)ARRAY_SIZE(_gPcDebugRooms); i++) {
+            width = textMeasureLineWidth((const u8*)_gPcDebugRooms[i].name);
+            if (choiceWidth < width) {
+                choiceWidth = width;
+            }
+        }
+        for (i = 1; i < (s32)ARRAY_SIZE(_gPcDebugStageNames); i++) {
+            width = textMeasureLineWidth((const u8*)_gPcDebugStageNames[i]);
+            if (choiceWidth < width) {
+                choiceWidth = width;
+            }
+        }
+        // No wider than the 4:3 screen (with the game's eight-pixel margins),
+        // as the settings panel: the gap between the columns narrows first.
+        widest = DISPLAY_SCREEN_WIDTH - 2 * PC_DEBUG_SCREEN_MARGIN_PIXELS -
+                 (object->panel.bounds.rect.w - (object->panel.contentRight.signedValue - object->panel.contentLeft.signedValue));
+        rowWidth = 2 * _gPcMenuCaretWidth + choiceWidth;
+        gap      = PC_DEBUG_COLUMN_GAP_PIXELS;
+        if (6 + labelWidth + gap + rowWidth + 6 > widest) {
+            gap = widest - (6 + labelWidth + rowWidth + 6);
+            if (gap < PC_DEBUG_COLUMN_GAP_MIN_PIXELS) {
+                gap = PC_DEBUG_COLUMN_GAP_MIN_PIXELS;
+            }
+        }
+        _gPcDebugChoiceX = 6 + labelWidth + gap;
+        if (_gPcDebugChoiceX + rowWidth + 6 > widest) {
+            _gPcDebugChoiceX = widest - rowWidth - 6;
+        }
+        uiSetPanelContentSize(&object->panel, _gPcDebugChoiceX + rowWidth + 6, 0);
+        object->panel.bounds.rect.x = -(object->panel.bounds.rect.w / 2);
+        object->panel.bounds.rect.y = -(object->panel.bounds.rect.h / 2);
+        _pcMenuFitTitle(&object->panel, _gPcMenuDebugTitle);
+        owningTask->state = 1;
+    }
+    if (object->result != USER_INTERFACE_RESULT_CONFIRM) {
+        object->result = USER_INTERFACE_RESULT_NONE;
+    }
+    uiDrawPanelLabel(&object->panel, (const char*)_gPcMenuDebugTitle);
+    uiUpdateList(list, &object->panel);
+    if (object->panel.control.word == USER_INTERFACE_PANEL_ACTIVE &&
+        padCheckButtons(0, PAD_BUTTON_QUERY_PRESSED, gPadCancelButtonMask) != 0) {
+        sndEvtRequestScriptStart(SOUND_MENU_CANCEL, 0, 0);
+        object->result = USER_INTERFACE_RESULT_CONFIRM;
+    }
+}
+
+static UiObjectDesc _gPcMenuDebugDesc = {
+    USER_INTERFACE_PANEL_TITLE_STYLE, { -100, -60, 200, 120 }, 32, 0, TASK_BODY_NONE, TASK_PRIORITY_CONTROL, _pcMenuUpdateDebugTask, 0
+};
+
+/// Opens the debug panel, its place the player's own room.
+static void _pcMenuOpenDebug(void)
+{
+    TaskNode*    previous;
+    TaskSpawnArg none;
+    s32          i;
+
+    if (_gPcDebugRoom >= (s32)ARRAY_SIZE(_gPcDebugRooms)) {
+        _gPcDebugRoom = 0;
+    }
+    for (i = 0; i < (s32)ARRAY_SIZE(_gPcDebugRooms); i++) {
+        if (_gPcDebugRooms[i].stage == gGameSession->location.stage && _gPcDebugRooms[i].area == gGameSession->location.area) {
+            if (i != _gPcDebugRoom) {
+                _gPcDebugRoom     = i;
+                _gPcDebugEntrance = 0;
+            }
+            break;
+        }
+    }
+    _gPcDebugGo = 0;
+    none.value  = 0;
+    previous    = taskGetActiveList();
+    taskSetActiveList(&_gPcMenuTasks);
+    _gPcMenuDebugPanel = uiSpawnObject(&_gPcMenuDebugDesc, none, USER_INTERFACE_PANEL_ACTIVE, 1, NULL);
+    taskSetActiveList(previous);
+    _gPcMenuState = PC_MENU_DEBUG;
+}
+
+/// Go to room: the live save's location, then the session reload, as the
+/// game's scripted transitions between rooms and stages do (actor_303600).
+/// Story flags stay as they are, so a room may play an event out of order.
+static void _pcMenuDebugWarp(void)
+{
+    const PcDebugRoom* room;
+    GameLocationKey*   location;
+    TaskSpawnArg       selector;
+    TaskSpawnArg       mode;
+    TaskSpawnArg       none;
+
+    room                 = &_gPcDebugRooms[_gPcDebugRoom];
+    location             = &gMcSaveData[MEMORY_CARD_SAVE_LIVE].state.location;
+    location->stage      = room->stage;
+    location->area       = room->area;
+    location->warp       = _gPcDebugEntrance + 1;
+    location->roomState  = 1;
+    gDisplayState.spriteVariant = 1;
+    selector.value = GAME_FLOW_RELOAD_TASK_SLOT;
+    mode.value     = GAME_FLOW_RELOAD_CAPTURE_FRAME;
+    none.value     = 0;
+    taskSpawnOnDefaultList(GAME_FLOW_RELOAD_TASK_BANK, selector, mode, none);
+}
+
 static void _pcMenuOpenPause(void)
 {
-    u8* labels[5];
+    u8* labels[6];
     s32 count;
 
     count                       = 0;
@@ -219,6 +578,10 @@ static void _pcMenuOpenPause(void)
     }
     _gPcMenuPauseRows[count]    = PC_MENU_THEN_CATEGORIES;
     labels[count++]             = _gPcMenuOptionsText;
+    if (_pcMenuCanDebug()) {
+        _gPcMenuPauseRows[count] = PC_MENU_THEN_DEBUG;
+        labels[count++]          = _gPcMenuDebugText;
+    }
     if (_pcMenuCanQuitToTitle()) {
         _gPcMenuPauseRows[count] = PC_MENU_THEN_CONFIRM_TITLE;
         labels[count++]          = _gPcMenuToTitleText;
@@ -669,6 +1032,12 @@ static void _pcMenuAfterClosing(void)
                 return;
             }
             break;
+        case PC_MENU_THEN_DEBUG:
+            _pcMenuOpenDebug();
+            if (_gPcMenuDebugPanel != NULL) {
+                return;
+            }
+            break;
     }
     // Back to the game: its dialogs as they were, its sound, and no button
     // the menu took reaching it.
@@ -676,6 +1045,9 @@ static void _pcMenuAfterClosing(void)
     sndEvtRequestScriptDuckRelease();
     padStartInputBlock(0);
     _gPcMenuState = PC_MENU_CLOSED;
+    if (then == PC_MENU_THEN_WARP) {
+        _pcMenuDebugWarp();
+    }
 }
 
 /// Draws the menu's frame: the saved picture, dimmed, under its ordering
@@ -739,6 +1111,8 @@ s32 pcMenuFrame(s32 blocked)
             _pcMenuAnswer(-1);
         } else if (_gPcMenuPanel != NULL) {
             _gPcMenuPanel->result = USER_INTERFACE_RESULT_CONFIRM;
+        } else if (_gPcMenuDebugPanel != NULL) {
+            _gPcMenuDebugPanel->result = USER_INTERFACE_RESULT_CONFIRM;
         }
     }
 
@@ -773,7 +1147,14 @@ s32 pcMenuFrame(s32 blocked)
         _gPcMenuSaveDone();
         _gPcMenuThen = PC_MENU_THEN_RESUME;
     }
-    if (_gPcMenuDialog == NULL && _gPcMenuPanel == NULL && _gPcMenuSave == NULL && _gPcMenuTasks.next == NULL) {
+    // The debug panel closed: back to the pause dialog, or Go to room.
+    if (_gPcMenuDebugPanel != NULL && _gPcMenuDebugPanel->result == USER_INTERFACE_RESULT_CONFIRM) {
+        uiStartTreeClosing(_gPcMenuDebugPanel, NULL);
+        _gPcMenuDebugPanel = NULL;
+        _gPcMenuThen       = _gPcDebugGo ? PC_MENU_THEN_WARP : PC_MENU_THEN_PAUSE;
+    }
+    if (_gPcMenuDialog == NULL && _gPcMenuPanel == NULL && _gPcMenuSave == NULL && _gPcMenuDebugPanel == NULL &&
+        _gPcMenuTasks.next == NULL) {
         _pcMenuAfterClosing();
     }
 
@@ -789,7 +1170,7 @@ const u8* const* pcMenuTexts(s32* count)
 {
     static const u8* const texts[] = {
         _gPcMenuPauseTitle, _gPcMenuResumeText, _gPcMenuSaveText, _gPcMenuOptionsText, gPcTextMovedToBox, gPcTextQuantity, gPcTextSetNumber, _gPcMenuToTitleText, _gPcMenuQuitGameText, _gPcMenuTitleTitle, _gPcMenuQuitTitle, _gPcMenuNoText, _gPcMenuYesText,
-        _gPcMenuSettingsText, _gPcMenuSettingsTitle, _gPcMenuSettingsPrompt,
+        _gPcMenuSettingsText, _gPcMenuSettingsTitle, _gPcMenuSettingsPrompt, _gPcMenuDebugText, _gPcMenuDebugTitle,
     };
 
     *count = ARRAY_SIZE(texts);
